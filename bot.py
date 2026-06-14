@@ -9,171 +9,199 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = os.getenv("GROUP_ID")  # например: -1001234567890
+GROUP_ID = os.getenv("GROUP_ID")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-}
-
-def extract_article(url: str) -> str | None:
-    """Извлекает артикул товара из ссылки WB"""
-    patterns = [
-        r"wildberries\.ru/catalog/(\d+)",
-        r"wb\.ru/catalog/(\d+)",
-        r"/(\d{7,12})/"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+def extract_article(url: str):
+    match = re.search(r'/catalog/(\d+)', url)
+    if match:
+        return match.group(1)
+    match = re.search(r'(\d{7,12})', url)
+    if match:
+        return match.group(1)
     return None
 
-def get_product_info(article: str) -> dict | None:
-    """Получает данные о товаре через API Wildberries"""
-    # Определяем корзину (basket) по артикулу
+def get_basket(vol: int) -> str:
+    if vol <= 143: return "01"
+    elif vol <= 287: return "02"
+    elif vol <= 431: return "03"
+    elif vol <= 719: return "04"
+    elif vol <= 1007: return "05"
+    elif vol <= 1061: return "06"
+    elif vol <= 1115: return "07"
+    elif vol <= 1169: return "08"
+    elif vol <= 1313: return "09"
+    elif vol <= 1601: return "10"
+    elif vol <= 1655: return "11"
+    elif vol <= 1919: return "12"
+    elif vol <= 2045: return "13"
+    elif vol <= 2189: return "14"
+    elif vol <= 2405: return "15"
+    elif vol <= 2621: return "16"
+    elif vol <= 2837: return "17"
+    else: return "18"
+
+def get_product_info(article: str):
     article_int = int(article)
-    if article_int <= 143:
-        basket = "01"
-    elif article_int <= 287:
-        basket = "02"
-    elif article_int <= 431:
-        basket = "03"
-    elif article_int <= 719:
-        basket = "04"
-    elif article_int <= 1007:
-        basket = "05"
-    elif article_int <= 1061:
-        basket = "06"
-    elif article_int <= 1115:
-        basket = "07"
-    elif article_int <= 1169:
-        basket = "08"
-    elif article_int <= 1313:
-        basket = "09"
-    elif article_int <= 1601:
-        basket = "10"
-    elif article_int <= 1655:
-        basket = "11"
-    elif article_int <= 1919:
-        basket = "12"
-    elif article_int <= 2045:
-        basket = "13"
-    elif article_int <= 2189:
-        basket = "14"
-    elif article_int <= 2405:
-        basket = "15"
-    elif article_int <= 2621:
-        basket = "16"
-    elif article_int <= 2837:
-        basket = "17"
-    else:
-        basket = "18"
+    vol = article_int // 100000
+    part = article_int // 1000
+    basket = get_basket(vol)
 
-    # Получаем данные о товаре
+    # Пробуем получить данные из card.json
+    card_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/info/ru/card.json"
+    
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "Accept": "application/json",
+        "Referer": "https://www.wildberries.ru/",
+        "Origin": "https://www.wildberries.ru",
+    })
+
+    product = {}
+    
+    # Пробуем card.json
     try:
-        vol = article_int // 100000
-        part = article_int // 1000
-        api_url = f"https://card.wb.ru/cards/v1/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}"
-        response = requests.get(api_url, headers=HEADERS, timeout=10)
-        data = response.json()
-
-        products = data.get("data", {}).get("products", [])
-        if not products:
-            return None
-
-        product = products[0]
-        name = product.get("name", "Без названия")
-        brand = product.get("brand", "")
-        rating = product.get("rating", 0)
-        feedbacks = product.get("feedbacks", 0)
-
-        # Цена
-        sizes = product.get("sizes", [])
-        price = None
-        original_price = None
-        for size in sizes:
-            price_data = size.get("price", {})
-            if price_data:
-                price = price_data.get("product", 0) // 100
-                original_price = price_data.get("basic", 0) // 100
-                break
-
-        # Фото
-        photos = []
-        imt_id = product.get("root", article)
-        for i in range(1, 5):
-            photo_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/images/big/{i}.jpg"
-            photos.append(photo_url)
-
-        return {
-            "name": name,
-            "brand": brand,
-            "rating": rating,
-            "feedbacks": feedbacks,
-            "price": price,
-            "original_price": original_price,
-            "photos": photos,
-            "article": article,
-            "url": f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
-        }
+        r = session.get(card_url, timeout=10)
+        logger.info(f"card.json status: {r.status_code}, url: {card_url}")
+        if r.status_code == 200:
+            data = r.json()
+            product["name"] = data.get("imt_name", data.get("subj_name", "Без названия"))
+            product["brand"] = data.get("brand_name", "")
+            logger.info(f"Got from card.json: {product}")
     except Exception as e:
-        logger.error(f"Ошибка получения товара: {e}")
+        logger.error(f"card.json error: {e}")
+
+    # Пробуем API для цены и рейтинга
+    api_urls = [
+        f"https://card.wb.ru/cards/v1/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}",
+        f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={article}",
+    ]
+    
+    for api_url in api_urls:
+        try:
+            r = session.get(api_url, timeout=10)
+            logger.info(f"API status: {r.status_code}, url: {api_url}")
+            if r.status_code == 200:
+                data = r.json()
+                products = data.get("data", {}).get("products", [])
+                if products:
+                    p = products[0]
+                    if not product.get("name"):
+                        product["name"] = p.get("name", "Без названия")
+                    if not product.get("brand"):
+                        product["brand"] = p.get("brand", "")
+                    product["rating"] = p.get("rating", 0)
+                    product["feedbacks"] = p.get("feedbacks", 0)
+                    
+                    # Цена
+                    sizes = p.get("sizes", [])
+                    for size in sizes:
+                        price_data = size.get("price", {})
+                        if price_data and price_data.get("product"):
+                            product["price"] = price_data["product"] // 100
+                            product["original_price"] = price_data.get("basic", 0) // 100
+                            break
+                    break
+        except Exception as e:
+            logger.error(f"API error {api_url}: {e}")
+
+    if not product.get("name"):
+        # Последняя попытка — seller-api
+        try:
+            seller_url = f"https://www.wildberries.ru/seller/seller-api/api/v1/products/{article}"
+            r = session.get(seller_url, timeout=10)
+            logger.info(f"seller-api status: {r.status_code}")
+            if r.status_code == 200:
+                data = r.json()
+                product["name"] = data.get("name", "Товар WB")
+        except Exception as e:
+            logger.error(f"seller-api error: {e}")
+
+    if not product.get("name"):
+        logger.error(f"Could not get product info for article {article}")
         return None
 
+    # Фото
+    photos = []
+    for i in range(1, 5):
+        photo_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/images/big/{i}.jpg"
+        photos.append(photo_url)
+
+    return {
+        "name": product.get("name", "Товар с Wildberries"),
+        "brand": product.get("brand", ""),
+        "rating": product.get("rating", 0),
+        "feedbacks": product.get("feedbacks", 0),
+        "price": product.get("price"),
+        "original_price": product.get("original_price"),
+        "photos": photos,
+        "article": article,
+        "url": f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+    }
+
 def format_post(product: dict) -> str:
-    """Формирует красивый пост"""
-    stars = "⭐" * round(product["rating"])
-    rating_str = f"{product['rating']} {stars}" if product["rating"] else "нет оценок"
-    feedbacks_str = f"({product['feedbacks']:,} отзывов)".replace(",", " ") if product["feedbacks"] else ""
+    rating = product.get("rating", 0)
+    feedbacks = product.get("feedbacks", 0)
 
-    price_str = ""
-    if product["price"] and product["original_price"] and product["original_price"] > product["price"]:
-        discount = round((1 - product["price"] / product["original_price"]) * 100)
-        price_str = f"💰 <s>{product['original_price']:,} ₽</s> → <b>{product['price']:,} ₽</b>  🔥 -{discount}%".replace(",", " ")
-    elif product["price"]:
-        price_str = f"💰 <b>{product['price']:,} ₽</b>".replace(",", " ")
+    if rating:
+        stars = "⭐" * min(round(rating), 5)
+        rating_str = f"{rating} {stars}"
+    else:
+        rating_str = "нет оценок"
 
-    brand_str = f"🏷 <b>{product['brand']}</b>\n" if product["brand"] else ""
+    feedbacks_str = f"({feedbacks:,} отзывов)".replace(",", " ") if feedbacks else ""
 
-    post = (
+    price = product.get("price")
+    original_price = product.get("original_price")
+
+    if price and original_price and original_price > price:
+        discount = round((1 - price / original_price) * 100)
+        price_str = f"💰 <s>{original_price:,} ₽</s> → <b>{price:,} ₽</b>  🔥 -{discount}%".replace(",", " ")
+    elif price:
+        price_str = f"💰 <b>{price:,} ₽</b>".replace(",", " ")
+    else:
+        price_str = "💰 Цена на сайте"
+
+    brand = product.get("brand", "")
+    brand_str = f"🏷 <b>{brand}</b>\n" if brand else ""
+
+    return (
         f"🛍 <b>{product['name']}</b>\n\n"
         f"{brand_str}"
         f"{price_str}\n\n"
         f"⭐ Рейтинг: {rating_str} {feedbacks_str}\n\n"
         f"🔗 <a href='{product['url']}'>Смотреть на Wildberries</a>"
     )
-    return post
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Привет! Отправь мне ссылку на товар с Wildberries, "
-        "и я опубликую красивый пост в группу.\n\n"
-        "📌 Пример ссылки:\nhttps://www.wildberries.ru/catalog/123456789/detail.aspx"
+        "👋 Привет! Отправь ссылку на товар Wildberries — опубликую пост в группу.\n\n"
+        "📌 Пример:\nhttps://www.wildberries.ru/catalog/215482022/detail.aspx"
     )
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
 
     if "wildberries.ru" not in text and "wb.ru" not in text:
-        await update.message.reply_text("❌ Это не похоже на ссылку Wildberries. Попробуй ещё раз.")
+        await update.message.reply_text("❌ Это не ссылка Wildberries.")
         return
 
-    await update.message.reply_text("⏳ Получаю данные о товаре...")
-
+    msg = await update.message.reply_text("⏳ Получаю данные о товаре...")
     article = extract_article(text)
+
     if not article:
-        await update.message.reply_text("❌ Не удалось найти артикул в ссылке. Проверь ссылку.")
+        await msg.edit_text("❌ Не найден артикул в ссылке.")
         return
 
+    logger.info(f"Processing article: {article}")
     product = get_product_info(article)
+
     if not product:
-        await update.message.reply_text("❌ Не удалось получить данные о товаре. Проверь ссылку или попробуй позже.")
+        await msg.edit_text("❌ Не удалось получить данные. Попробуй другую ссылку.")
         return
 
     post_text = format_post(product)
 
-    # Пробуем отправить с фото
     try:
         valid_photos = []
         for photo_url in product["photos"][:4]:
@@ -191,16 +219,15 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     media_group.append(InputMediaPhoto(media=photo_url, caption=post_text, parse_mode="HTML"))
                 else:
                     media_group.append(InputMediaPhoto(media=photo_url))
-
             await context.bot.send_media_group(chat_id=GROUP_ID, media=media_group)
         else:
             await context.bot.send_message(chat_id=GROUP_ID, text=post_text, parse_mode="HTML")
 
-        await update.message.reply_text("✅ Пост успешно опубликован в группу!")
+        await msg.edit_text("✅ Пост опубликован в группу!")
 
     except Exception as e:
-        logger.error(f"Ошибка публикации: {e}")
-        await update.message.reply_text(f"❌ Ошибка при публикации: {e}")
+        logger.error(f"Publish error: {e}")
+        await msg.edit_text(f"❌ Ошибка публикации: {e}")
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -211,3 +238,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
