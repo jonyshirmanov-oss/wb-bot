@@ -2,6 +2,7 @@ import os
 import re
 import logging
 import requests
+import json
 from telegram import Update, InputMediaPhoto
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
 
@@ -46,79 +47,93 @@ def get_product_info(article: str):
     part = article_int // 1000
     basket = get_basket(vol)
 
-    # Пробуем получить данные из card.json
-    card_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/info/ru/card.json"
-    
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
-        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": "https://www.wildberries.ru/",
         "Origin": "https://www.wildberries.ru",
+        "Connection": "keep-alive",
     })
 
     product = {}
-    
-    # Пробуем card.json
+
+    # Шаг 1: card.json для названия и бренда
+    card_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/info/ru/card.json"
     try:
-        r = session.get(card_url, timeout=10)
-        logger.info(f"card.json status: {r.status_code}, url: {card_url}")
+        r = session.get(card_url, timeout=15)
+        logger.info(f"card.json [{r.status_code}]: {card_url}")
         if r.status_code == 200:
             data = r.json()
-            product["name"] = data.get("imt_name", data.get("subj_name", "Без названия"))
-            product["brand"] = data.get("brand_name", "")
-            logger.info(f"Got from card.json: {product}")
+            product["name"] = data.get("imt_name") or data.get("subj_name") or ""
+            product["brand"] = data.get("brand_name") or ""
+            logger.info(f"card.json name={product.get('name')} brand={product.get('brand')}")
     except Exception as e:
         logger.error(f"card.json error: {e}")
 
-    # Пробуем API для цены и рейтинга
-    api_urls = [
-        f"https://card.wb.ru/cards/v1/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}",
-        f"https://card.wb.ru/cards/v2/detail?appType=1&curr=rub&dest=-1257786&nm={article}",
-    ]
-    
-    for api_url in api_urls:
+    # Шаг 2: price.json для цены
+    price_url = f"https://basket-{basket}.wbbasket.ru/vol{vol}/part{part}/{article}/info/price-history.json"
+    try:
+        r = session.get(price_url, timeout=15)
+        logger.info(f"price.json [{r.status_code}]")
+        if r.status_code == 200:
+            data = r.json()
+            if data and isinstance(data, list) and len(data) > 0:
+                last = data[-1]
+                price_val = last.get("price", {})
+                if price_val:
+                    product["price"] = price_val.get("RUB", 0) // 100
+                    logger.info(f"price from history: {product.get('price')}")
+    except Exception as e:
+        logger.error(f"price.json error: {e}")
+
+    # Шаг 3: API WB для цены, рейтинга, отзывов
+    api_url = f"https://card.wb.ru/cards/v1/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm={article}"
+    try:
+        r = session.get(api_url, timeout=15)
+        logger.info(f"card API [{r.status_code}]")
+        if r.status_code == 200:
+            data = r.json()
+            products = data.get("data", {}).get("products", [])
+            if products:
+                p = products[0]
+                if not product.get("name"):
+                    product["name"] = p.get("name", "")
+                if not product.get("brand"):
+                    product["brand"] = p.get("brand", "")
+                product["rating"] = p.get("rating", 0)
+                product["feedbacks"] = p.get("feedbacks", 0)
+                sizes = p.get("sizes", [])
+                for size in sizes:
+                    pd = size.get("price", {})
+                    if pd and pd.get("product"):
+                        product["price"] = pd["product"] // 100
+                        product["original_price"] = pd.get("basic", 0) // 100
+                        break
+                logger.info(f"API: rating={product.get('rating')} price={product.get('price')}")
+    except Exception as e:
+        logger.error(f"card API error: {e}")
+
+    # Шаг 4: Попробуем nmid API
+    if not product.get("price"):
         try:
-            r = session.get(api_url, timeout=10)
-            logger.info(f"API status: {r.status_code}, url: {api_url}")
-            if r.status_code == 200:
-                data = r.json()
-                products = data.get("data", {}).get("products", [])
-                if products:
-                    p = products[0]
-                    if not product.get("name"):
-                        product["name"] = p.get("name", "Без названия")
-                    if not product.get("brand"):
-                        product["brand"] = p.get("brand", "")
-                    product["rating"] = p.get("rating", 0)
-                    product["feedbacks"] = p.get("feedbacks", 0)
-                    
-                    # Цена
-                    sizes = p.get("sizes", [])
-                    for size in sizes:
-                        price_data = size.get("price", {})
-                        if price_data and price_data.get("product"):
-                            product["price"] = price_data["product"] // 100
-                            product["original_price"] = price_data.get("basic", 0) // 100
-                            break
-                    break
+            nm_url = f"https://www.wildberries.ru/catalog/{article}/detail.aspx"
+            r2 = session.get(nm_url, timeout=15)
+            logger.info(f"WB page [{r2.status_code}]")
+            text = r2.text
+            # Ищем цену в HTML
+            price_match = re.search(r'"priceU":(\d+)', text)
+            if price_match:
+                product["price"] = int(price_match.group(1)) // 100
+            sale_match = re.search(r'"salePriceU":(\d+)', text)
+            if sale_match:
+                product["original_price"] = int(sale_match.group(1)) // 100
         except Exception as e:
-            logger.error(f"API error {api_url}: {e}")
+            logger.error(f"WB page error: {e}")
 
     if not product.get("name"):
-        # Последняя попытка — seller-api
-        try:
-            seller_url = f"https://www.wildberries.ru/seller/seller-api/api/v1/products/{article}"
-            r = session.get(seller_url, timeout=10)
-            logger.info(f"seller-api status: {r.status_code}")
-            if r.status_code == 200:
-                data = r.json()
-                product["name"] = data.get("name", "Товар WB")
-        except Exception as e:
-            logger.error(f"seller-api error: {e}")
-
-    if not product.get("name"):
-        logger.error(f"Could not get product info for article {article}")
+        logger.error(f"No name found for article {article}")
         return None
 
     # Фото
@@ -206,11 +221,13 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         valid_photos = []
         for photo_url in product["photos"][:4]:
             try:
-                r = requests.head(photo_url, timeout=5)
+                r = requests.head(photo_url, timeout=8)
                 if r.status_code == 200:
                     valid_photos.append(photo_url)
             except:
                 continue
+
+        logger.info(f"Valid photos: {len(valid_photos)}")
 
         if valid_photos:
             media_group = []
@@ -238,4 +255,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
